@@ -327,6 +327,12 @@ results_dict = run_simulation_and_analysis(ACW=ACW)  # Your results_dict from th
 csv_path = '/Users/satrokommos/Documents/9th sem/code/data/Text/simulation.csv'
 export_results_to_csv(results_dict, csv_path)
 
+# Example usage
+ACW = True  # Set to False to use raw time series instead
+results_dict = run_simulation_and_analysis(ACW=ACW)  # Your results_dict from the function
+csv_path = '/Users/satrokommos/Documents/9th sem/code/data/Text/ACWsimulation.csv'
+export_results_to_csv(results_dict, csv_path)
+
 
 
 

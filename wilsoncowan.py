@@ -167,7 +167,7 @@ def run_simulation_and_analysis(ACW=False):
 
     results_dict = {}
 
-    specific_rois = [24, 25, 107] #
+    specific_rois = [23, 24, 106] #
     # Simulation parameters - define or adjust these according to your needs
     tau, bias, k, s, C, tspan, dt, burn = 1.0, -3, 0.5, 0, 0.1, 1000, 0.01, 100
     T_BOLD, dt_BOLD = tspan - burn, 0.01  # Adjust total time and timestep for the BOLD simulation
@@ -182,9 +182,9 @@ def run_simulation_and_analysis(ACW=False):
         trimmed_s_input = s_input[:, int(burn / dt):]
         discretized_s_input = discretize_signal(trimmed_s_input.mean(axis=0, keepdims=True), dt, 1.0)
         discretized_s_input=discretized_s_input.flatten()
-        mbb_s = [markov_block_bootstrap(discretized_s_input, 1) for run in range(100)]
-        phi_s = [philipp_shuffle(discretized_s_input, 1) for run in range(100)]
-        ran_s = [np.random.permutation(discretized_s_input) for run in range(100)]
+        mbb_s = [markov_block_bootstrap(discretized_s_input, 1) for run in range(1000)]
+        phi_s = [philipp_shuffle(discretized_s_input, 1) for run in range(1000)]
+        ran_s = [np.random.permutation(discretized_s_input) for run in range(1000)]
 
         # Initialize arrays to store shuffled time series for each ROI
         mbb_bold_shuffled = []

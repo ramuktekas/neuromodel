@@ -29,10 +29,18 @@ def discretize_signal(signal, dt, interval=1.0):
 
 def calculate_te(source, target, m):
     """Calculate Transfer Entropy with varying tau values."""
+    # Ensure both source and target are arrays and not empty or scalar
+    source = np.asarray(source).flatten()
+    target = np.asarray(target).flatten()
+    if source.size == 0 or target.size == 0:
+        raise ValueError("Source or target is empty.")
+    if source.ndim != 1 or target.ndim != 1:
+        raise ValueError("Source or target is not 1-dimensional.")
+    
     min_length = min(len(source), len(target))
-    source = np.array(source)[:min_length]
-    target = np.array(target)[:min_length]
-    tau_values = np.arange(1, 11)
+    source = source[:min_length]
+    target = target[:min_length]
+    tau_values = np.arange(1, 2)  # Only tau=1 considered here; adjust if needed
     te_results = [te.te_compute(source, target, m, tau) for tau in tau_values]
     return te_results
 
@@ -71,30 +79,22 @@ def bw(r, T, dt):
         x[n + 1, 2, :] = x[n, 2, :] + dt * itauo * (x[n, 1, :] - x[n, 2, :] ** ialpha)
         x[n + 1, 3, :] = x[n, 3, :] + dt * itauo * ((x[n, 1, :] * (1 - (1 - params['Eo']) ** (1 / x[n, 1, :])) / params['Eo']) - (x[n, 2, :] ** ialpha * x[n, 3, :] / x[n, 2, :]))
     return 100 / params['Eo'] * params['vo'] * (k1 *(1 - x[:, 3, :] / x[:, 2, :]) + k3 * (1 - x[:, 2, :])).squeeze().T
-
 def colorednoise(ple, n, amplitude):
     """Generate pink noise."""
-    # Define coefficients
     h = np.zeros(n)
     h[0] = 1.0
     for i in range(1, n):
         h[i] = (h[i-1] / (i + 1)) * (ple/2 + i)
 
-    # Generate white noise
     whitenoise = np.random.normal(0, 1, n)
-    
-    # Convolve white noise with kernel in frequency domain
     noise = fftconvolve(whitenoise, h[:len(whitenoise)], mode='same')
     return amplitude * noise
 
-# Load the connectivity matrix
-connectivity_matrix_path = '/Users/satrokommos/Documents/modelling_wilsoncowan/averageConnectivity_Fpt.mat'
-with h5py.File(connectivity_matrix_path, 'r') as f:
-    W = np.array(f['/Fpt'])
-    W[np.isnan(W)] = 0  # Replace NaN values with 0
+
+
 
 #Main simulation and analysis
-specific_rois = [23, 24, 106] # Adjusted for 0-based indexing
+
 
 #Prepare to accumulate results
 te_values_dict = {}
@@ -182,25 +182,60 @@ def run_simulation_and_analysis(ACW=False):
 
     results_dict = {}
 
-    specific_rois = [24, 25, 107] #
+    specific_rois = [23, 24, 106] #
     # Simulation parameters - define or adjust these according to your needs
-    tau, bias, k, C, tspan, dt, burn = 1.0, -3, 0.5, 0.1, 1000, 0.01, 100
-    T_BOLD, dt_BOLD = tspan - burn, 0.01
-    ple, amplitude = 0.7, 1.0  # Pink noise parameters
+    tau, bias, k, s, C, tspan, dt, burn = 1.0, -3, 0.5, 0, 0.1, 1000, 0.01, 100
+    T_BOLD, dt_BOLD = tspan - burn, 0.01  # Adjust total time and timestep for the BOLD simulation
+    
 
-    for run in range(10):
+    for run in range(3):
         print(f"Running simulation {run + 1}/10")
         # Perform the simulation...
-        x, time, s_input = wilsoncowan_RK2(tau, bias, W, k, C, tspan, dt, burn, ple, amplitude)
-        bold_signal = bw(x, T_BOLD, dt_BOLD)
+        num_simulations = 50  # Number of simulations to average over
+
+        # Initialize storage for BOLD signals across simulations
+        
+        s_inputs = None
+
+        # Initialize storage for processed BOLD signals
+        processed_bold_signals = {roi: [] for roi in specific_rois}
+
+        for run in range(num_simulations):
+            print(f"Running simulation {run + 1}/{num_simulations}")
+            x, time, s_input = wilsoncowan_RK2(tau, bias, W, k, C, tspan, dt, burn, ple, amplitude)
+            bold_signal = bw(x, T_BOLD, dt_BOLD)
+
+            # Process each ROI's BOLD signal individually
+            for roi in specific_rois:
+                bold_signal_detrended = detrend(bold_signal[roi])
+                print(f"ROI {roi}: Length of detrended BOLD signal = {len(bold_signal_detrended)}")
+
+                filtered_BOLD = apply_bandpass(bold_signal_detrended, 0.02, 0.1, 1, 5)
+                discretized_BOLD = discretize_signal(filtered_BOLD.reshape(1, -1), dt_BOLD, 1.0).flatten()
+                
+                if run == 0:
+                    processed_bold_signals[roi] = np.zeros((num_simulations, len(discretized_BOLD)))
+                
+                processed_bold_signals[roi][run, :] = discretized_BOLD
+            # Collect s_input across simulations
+            if s_inputs is None:
+                s_inputs = np.zeros((num_simulations, s_input.shape[0], s_input.shape[1]))
+            s_inputs[run, :, :] = s_input
+
+        # Calculate the average BOLD signal for each ROI
+        averaged_bold_signals = {roi: np.mean(processed_bold_signals[roi], axis=0) for roi in specific_rois}
+        averaged_s_input = np.mean(s_inputs, axis=0)
+        print(f'Shape of averaged_s_input: {averaged_s_input.shape}')
+
+
 
         # Prepare the external input...
-        trimmed_s_input = s_input[:, int(burn / dt):]
+        trimmed_s_input = averaged_s_input[:,int(burn / dt):]
         discretized_s_input = discretize_signal(trimmed_s_input.mean(axis=0, keepdims=True), dt, 1.0)
         discretized_s_input=discretized_s_input.flatten()
-        mbb_s = [markov_block_bootstrap(discretized_s_input, 1) for run in range(100)]
-        phi_s = [philipp_shuffle(discretized_s_input, 1) for run in range(100)]
-        ran_s = [np.random.permutation(discretized_s_input) for run in range(100)]
+        mbb_s = [markov_block_bootstrap(discretized_s_input, 1) for run in range(1000)]
+        phi_s = [philipp_shuffle(discretized_s_input, 1) for run in range(1000)]
+        ran_s = [np.random.permutation(discretized_s_input) for run in range(1000)]
 
         # Initialize arrays to store shuffled time series for each ROI
         mbb_bold_shuffled = []
@@ -212,14 +247,11 @@ def run_simulation_and_analysis(ACW=False):
         # For each ROI, calculate TE for ACW time series and shuffled ACW time series, then calculate p-values
         for i, roi in enumerate(specific_rois):
             # Detrend and discretize the BOLD signal for the current ROI
-            bold_signal_detrended = detrend(bold_signal[roi, :])
-            discretized_BOLD = discretize_signal(bold_signal_detrended.reshape(1, -1), dt_BOLD, 1.0).flatten()
-            filtered_BOLD = apply_bandpass(discretized_BOLD, 0.02, 0.1, 1, 5)
-
+            
             # Generate 100 shuffled time series using each method for the current ROI
-            mbb_bold = [markov_block_bootstrap(filtered_BOLD, 1) for _ in range(1000)]
-            phi_bold = [philipp_shuffle(filtered_BOLD, 1) for _ in range(1000)]
-            ran_bold = [np.random.permutation(filtered_BOLD) for _ in range(1000)]
+            mbb_bold = [markov_block_bootstrap(averaged_bold_signals[roi], 1) for _ in range(1000)]
+            phi_bold = [philipp_shuffle(averaged_bold_signals[roi], 1) for _ in range(1000)]
+            ran_bold = [np.random.permutation(averaged_bold_signals[roi]) for _ in range(1000)]
 
             mbb_bold_shuffled.append(mbb_bold)
             phi_bold_shuffled.append(phi_bold)
@@ -236,116 +268,122 @@ def run_simulation_and_analysis(ACW=False):
             shuffled_acw_s_ran = [get_acw_time_series(shuffle, 150, 1) for shuffle in ran_s]
 
             # Initialize storage for p-values for forward and reverse TE for each shuffle method
-            p_values_forward = {'mbb': [], 'phi': [], 'ran': []}
-            p_values_reverse = {'mbb': [], 'phi': [], 'ran': []}
-            if ACW:
-                # Original ACW TE calculations
-                acw_bold = get_acw_time_series(discretized_BOLD, 150, 1)
-                acw_s_input = get_acw_time_series(discretized_s_input, 150, 1)
-                te_results = calculate_te(acw_s_input, acw_bold, m=3)
-                te_results_reverse = calculate_te(acw_bold, acw_s_input, m=3)
+            p_values_forward_true = {'mbb': [], 'phi': [], 'ran': []}
+            p_values_reverse_true = {'mbb': [], 'phi': [], 'ran': []}
+            p_values_forward_fals = {'mbb': [], 'phi': [], 'ran': []}
+            p_values_reverse_fals = {'mbb': [], 'phi': [], 'ran': []}
+            
+            # Original ACW TE calculations
+            acw_bold_signals = {roi: [] for roi in specific_rois}
+            acw_bold_signals[roi] = [get_acw_time_series(processed_bold_signals[roi][run, :], 150, 1) for run in range(num_simulations)]
+            averaged_acw_bold = np.mean(acw_bold_signals[roi], axis=0)
+            print(f'Shape of averaged_acw_bold: {averaged_acw_bold.shape}')
 
-                # Calculate p-values for forward and reverse TE using shuffled ACW time series
-                p_values_forward['mbb'].append(p_value(acw_s_input, shuffled_acw_bold_mbb, te_results))
-                p_values_forward['phi'].append(p_value(acw_s_input, shuffled_acw_bold_phi, te_results))
-                p_values_forward['ran'].append(p_value(acw_s_input, shuffled_acw_bold_ran, te_results))
+            acw_s_input = get_acw_time_series(discretized_s_input, 150, 1)
+            te_results_true = calculate_te(acw_s_input, averaged_acw_bold, m=3)
+            te_results_reverse_true = calculate_te(averaged_acw_bold, acw_s_input, m=3)
 
-                p_values_reverse['mbb'].append(p_value(acw_bold, shuffled_acw_s_mbb, te_results_reverse))
-                p_values_reverse['phi'].append(p_value(acw_bold, shuffled_acw_s_phi, te_results_reverse))
-                p_values_reverse['ran'].append(p_value(acw_bold, shuffled_acw_s_ran, te_results_reverse))
+            # Calculate p-values for forward and reverse TE using shuffled ACW time series
+            p_values_forward_true['mbb'].append(p_value(acw_s_input, shuffled_acw_bold_mbb, te_results_true))
+            p_values_forward_true['phi'].append(p_value(acw_s_input, shuffled_acw_bold_phi, te_results_true))
+            p_values_forward_true['ran'].append(p_value(acw_s_input, shuffled_acw_bold_ran, te_results_true))
 
+            p_values_reverse_true['mbb'].append(p_value(acw_bold_signals[roi], shuffled_acw_s_mbb, te_results_reverse_true))
+            p_values_reverse_true['phi'].append(p_value(acw_bold_signals[roi], shuffled_acw_s_phi, te_results_reverse_true))
+            p_values_reverse_true['ran'].append(p_value(acw_bold_signals[roi], shuffled_acw_s_ran, te_results_reverse_true))
 
+            # Standard analysis without ACW time series
 
-            else:
+            # Corrected to use discretized_s_input.flatten() and filtered_BOLD directly
+            averaged_processed_signals = {roi: np.mean(processed_bold_signals[roi], axis=0) for roi in specific_rois}
+            te_results_fals = calculate_te(discretized_s_input.flatten(), averaged_processed_signals[roi], m=3)
 
-                # Standard analysis without ACW time series
+            te_results_reverse_fals = calculate_te(averaged_processed_signals[roi], discretized_s_input.flatten(), m=3)
 
-                # Corrected to use discretized_s_input.flatten() and filtered_BOLD directly
+            # Corrected to pass the entire list of shuffled series
 
-                te_results = calculate_te(discretized_s_input.flatten(), filtered_BOLD, m=3)
+            p_values_forward_fals['mbb'].append(p_value(discretized_s_input.flatten(), mbb_bold, te_results_fals))
 
-                te_results_reverse = calculate_te(filtered_BOLD, discretized_s_input.flatten(), m=3)
+            p_values_forward_fals['phi'].append(p_value(discretized_s_input.flatten(), phi_bold, te_results_fals))
 
-                # Corrected to pass the entire list of shuffled series
+            p_values_forward_fals['ran'].append(p_value(discretized_s_input.flatten(), ran_bold, te_results_fals))
 
-                p_values_forward['mbb'].append(p_value(discretized_s_input.flatten(), mbb_bold, te_results))
+            p_values_reverse_fals['mbb'].append(p_value(averaged_processed_signals[roi], mbb_s, te_results_reverse_fals))
 
-                p_values_forward['phi'].append(p_value(discretized_s_input.flatten(), phi_bold, te_results))
+            p_values_reverse_fals['phi'].append(p_value(averaged_processed_signals[roi], phi_s, te_results_reverse_fals))
 
-                p_values_forward['ran'].append(p_value(discretized_s_input.flatten(), ran_bold, te_results))
-
-                p_values_reverse['mbb'].append(p_value(filtered_BOLD, mbb_s, te_results_reverse))
-
-                p_values_reverse['phi'].append(p_value(filtered_BOLD, phi_s, te_results_reverse))
-
-                p_values_reverse['ran'].append(p_value(filtered_BOLD, ran_s, te_results_reverse))
+            p_values_reverse_fals['ran'].append(p_value(averaged_processed_signals[roi], ran_s, te_results_reverse_fals))
             # Store results for the current ROI in the results dictionary
             if roi not in results_dict:
                 results_dict[roi] = {
-                    'te_results': [],
-                    'te_results_reverse': [],
-                    'p_values_forward': {'mbb': [], 'phi': [], 'ran': []},
-                    'p_values_reverse': {'mbb': [], 'phi': [], 'ran': []}
+                    'te_results_true': [],
+                    'te_results_reverse_true': [],
+                    'p_values_forward_true': {'mbb': [], 'phi': [], 'ran': []},
+                    'p_values_reverse_true': {'mbb': [], 'phi': [], 'ran': []},
+                    'te_results_fals': [],
+                    'te_results_reverse_fals': [],
+                    'p_values_forward_fals': {'mbb': [], 'phi': [], 'ran': []},
+                    'p_values_reverse_fals': {'mbb': [], 'phi': [], 'ran': []}
                 }
 
             # Append the current run's TE results and p-values to the ROI's entry in results_dict
-            results_dict[roi]['te_results'].append(te_results)
-            results_dict[roi]['te_results_reverse'].append(te_results_reverse)
+            results_dict[roi]['te_results_true'].append(te_results_true)
+            results_dict[roi]['te_results_reverse_true'].append(te_results_reverse_true)
+            results_dict[roi]['te_results_fals'].append(te_results_fals)
+            results_dict[roi]['te_results_reverse_fals'].append(te_results_reverse_fals)
 
             # Since p_values_forward and p_values_reverse contain lists of p-values for the current run, we append them directly
             for method in ['mbb', 'phi', 'ran']:
-                results_dict[roi]['p_values_forward'][method].append(p_values_forward[method][
+                results_dict[roi]['p_values_forward_true'][method].append(p_values_forward_true[method][
                                                                          -1])  # Assuming p_values_forward[method] is a list of p-values for the current run
-                results_dict[roi]['p_values_reverse'][method].append(p_values_reverse[method][
+                results_dict[roi]['p_values_reverse_true'][method].append(p_values_reverse_true[method][
+                                                                         -1])  # Assuming p_values_reverse[method] is a list of p-values for the current run
+                results_dict[roi]['p_values_forward_fals'][method].append(p_values_forward_fals[method][
+                                                                         -1])  # Assuming p_values_forward[method] is a list of p-values for the current run
+                results_dict[roi]['p_values_reverse_fals'][method].append(p_values_reverse_fals[method][
                                                                          -1])  # Assuming p_values_reverse[method] is a list of p-values for the current run
     return results_dict
 def export_results_to_csv(results_dict, csv_path):
-    # Initialize a list to hold all rows of the CSV
     csv_rows = []
-
-    # Iterate through each ROI in the results dictionary
     for roi, data in results_dict.items():
-        # For each ROI, extract TE results, reverse TE results, and p-values
-        te_results = data['te_results']
-        te_results_reverse = data['te_results_reverse']
-        p_values_forward = data['p_values_forward']
-        p_values_reverse = data['p_values_reverse']
-
-        # Assuming each list within te_results and te_results_reverse corresponds to a run
-        # and contains TE values for each of the 10 taus
-        for run_index, (te_run, te_reverse_run) in enumerate(zip(te_results, te_results_reverse)):
-            for tau_index, (te_value, te_reverse_value) in enumerate(zip(te_run, te_reverse_run), start=1):
-                # For each tau, create a row with the TE value, reverse TE value, and corresponding p-values
-                row = {
-                    'ROI': roi,
-                    'Run': run_index + 1,
-                    'Tau': tau_index,
-                    'TE Value': te_value,
-                    'TE Reverse Value': te_reverse_value,
-                }
-                # Add p-values for each shuffling method
-                for method in ['mbb', 'phi', 'ran']:
-                    row[f'P-Value Forward {method}'] = p_values_forward[method][run_index][tau_index - 1]
-                    row[f'P-Value Reverse {method}'] = p_values_reverse[method][run_index][tau_index - 1]
-
-                # Append the row to the list of rows
-                csv_rows.append(row)
+        num_runs = len(data['te_results_true'])
+        for run_index in range(num_runs):
+            for method in ['mbb', 'phi', 'ran']:
+                for tau_index in range(len(data['te_results_true'][run_index])):
+                    row = {
+                        'ROI': roi,
+                        'Run': run_index + 1,
+                        'Tau': tau_index + 1,
+                        'TE Value True': data['te_results_true'][run_index][tau_index],
+                        'TE Reverse Value True': data['te_results_reverse_true'][run_index][tau_index],
+                        'P-Value Forward True MBB': data['p_values_forward_true']['mbb'][run_index][tau_index],
+                        'P-Value Reverse True MBB': data['p_values_reverse_true']['mbb'][run_index][tau_index],
+                        'TE Value False': data['te_results_fals'][run_index][tau_index],
+                        'TE Reverse Value False': data['te_results_reverse_fals'][run_index][tau_index],
+                        'P-Value Forward False MBB': data['p_values_forward_fals']['mbb'][run_index][tau_index],
+                        'P-Value Reverse False MBB': data['p_values_reverse_fals']['mbb'][run_index][tau_index],
+                    }
+                    # Add phi and ran values
+                    row.update({
+                        'P-Value Forward True PHI': data['p_values_forward_true']['phi'][run_index][tau_index],
+                        'P-Value Reverse True PHI': data['p_values_reverse_true']['phi'][run_index][tau_index],
+                        'P-Value Forward True RAN': data['p_values_forward_true']['ran'][run_index][tau_index],
+                        'P-Value Reverse True RAN': data['p_values_reverse_true']['ran'][run_index][tau_index],
+                        'P-Value Forward False PHI': data['p_values_forward_fals']['phi'][run_index][tau_index],
+                        'P-Value Reverse False PHI': data['p_values_reverse_fals']['phi'][run_index][tau_index],
+                        'P-Value Forward False RAN': data['p_values_forward_fals']['ran'][run_index][tau_index],
+                        'P-Value Reverse False RAN': data['p_values_reverse_fals']['ran'][run_index][tau_index],
+                    })
+                    csv_rows.append(row)
 
     # Convert the list of rows to a DataFrame and then to a CSV file
     df = pd.DataFrame(csv_rows)
     df.to_csv(csv_path, index=False)
     print(f'Results saved to {csv_path}.')
 
-
-# Example usage
-ACW = False  # Set to False to use raw time series instead
-results_dict = run_simulation_and_analysis(ACW=ACW)  # Your results_dict from the function
-csv_path = '/Users/satrokommos/Documents/9thsem/code/data/Text/Pinksimulation.csv'
-export_results_to_csv(results_dict, csv_path)
-
-# Example usage
-ACW = True  # Set to False to use raw time series instead
-results_dict = run_simulation_and_analysis(ACW=ACW)  # Your results_dict from the function
-csv_path = '/Users/satrokommos/Documents/9thsem/code/data/Text/PinkACWsimulation.csv'
-export_results_to_csv(results_dict, csv_path)
-
+ple, amplitude = -0.5, 1.0
+# Load the connectivity matrix
+connectivity_matrix_path = '/Users/satrokommos/Documents/modelling_wilsoncowan/averageConnectivity_Fpt.mat'
+with h5py.File(connectivity_matrix_path, 'r') as f:
+    W = np.array(f['/Fpt'])
+    W[np.isnan(W)] = 0.5  # Replace NaN values with 0
